@@ -157,8 +157,10 @@ class BVHMotion():
         调整关节顺序为target_joint_name
         '''
         idx = [self.joint_name.index(joint_name) for joint_name in target_joint_name]
+        idx_inv = [target_joint_name.index(joint_name) for joint_name in self.joint_name]
         self.joint_name = [self.joint_name[i] for i in idx]
-        self.joint_parent = [self.joint_parent[i] for i in idx]
+        self.joint_parent = [idx_inv[self.joint_parent[i]] for i in idx]
+        self.joint_parent[0] = -1
         self.joint_channel = [self.joint_channel[i] for i in idx]
         self.joint_position = self.joint_position[:,idx,:]
         self.joint_rotation = self.joint_rotation[:,idx,:]
@@ -206,7 +208,19 @@ class BVHMotion():
         Ry = np.zeros_like(rotation)
         Rxz = np.zeros_like(rotation)
         # TODO: 你的代码
-        
+        y_axis = np.array([0, 1.0, 0])
+        y_rotation = R.from_quat(rotation).apply(y_axis)
+
+        rot_axis = np.cross(y_rotation, y_axis) #从旋转之后的y轴，旋转回全局的y轴
+        theta = np.arcsin(np.linalg.norm(rot_axis))
+        rot_axis = rot_axis / np.linalg.norm(rot_axis) * theta
+        if theta == 0:
+            rot_axis = [0,0,0]
+        Ry = R.from_rotvec(rot_axis) * R.from_quat(rotation)
+        Rxz = R.inv(Ry) * R.from_quat(rotation)
+
+        Ry = Ry.as_quat()
+        Rxz = Rxz.as_quat()
         return Ry, Rxz
     
     # part 1
@@ -227,9 +241,29 @@ class BVHMotion():
         res = self.raw_copy() # 拷贝一份，不要修改原始数据
         
         # 比如说，你可以这样调整第frame_num帧的根节点平移
-        offset = target_translation_xz - res.joint_position[frame_num, 0, [0,2]]
-        res.joint_position[:, 0, [0,2]] += offset
+        # offset = target_translation_xz - res.joint_position[frame_num, 0, [0,2]]
+        # res.joint_position[:, 0, [0,2]] += offset
+
         # TODO: 你的代码
+
+        #更改所有帧中根节点的朝向
+        cos_theta = np.array([0,1]).dot(target_facing_direction_xz/np.linalg.norm(target_facing_direction_xz))
+        theta = np.arccos(cos_theta) #将z轴从[0,0,1]旋转到target_facing_direction_xz绕y轴的旋转度数
+        r_newy, _ = self.decompose_rotation_with_yaxis(R.from_rotvec(np.array([0,1,0]) * theta).as_quat())
+        r_oldy, _ = self.decompose_rotation_with_yaxis(self.joint_rotation[frame_num, 0])
+
+        rotation = R.from_quat(r_newy) * R.inv(R.from_quat(r_oldy))
+
+        for i in range(0, self.joint_rotation.shape[0]):
+            res.joint_rotation[i, 0] = (rotation * R.from_quat(self.joint_rotation[i, 0])).as_quat()
+
+        #相对frame_num的偏移
+        offsets = res.joint_position[:, 0] - res.joint_position[frame_num, 0]
+        target_pos = [target_translation_xz[0],res.joint_position[frame_num, 0, 1], target_translation_xz[1]]
+        offsets = rotation.apply(offsets)
+
+        res.joint_position[:, 0] = offsets + target_pos
+
         return res
 
 # part2
@@ -247,8 +281,43 @@ def blend_two_motions(bvh_motion1, bvh_motion2, alpha):
     res.joint_rotation = np.zeros((len(alpha), res.joint_rotation.shape[1], res.joint_rotation.shape[2]))
     res.joint_rotation[...,3] = 1.0
 
-    # TODO: 你的代码
+    len1 = bvh_motion1.joint_position.shape[0]
+    len2 = bvh_motion2.joint_position.shape[0]
+    len_joint = res.joint_position.shape[1]
     
+    # res.joint_position = np.concatenate([bvh_motion1.joint_position, bvh_motion2.joint_position], axis=0)
+    #res.joint_rotation = np.concatenate([bvh_motion1.joint_rotation, bvh_motion2.joint_rotation], axis=0)
+    # res.joint_position = bvh_motion1.joint_position[0:res.joint_position.shape[0]]
+    # res.joint_rotation = bvh_motion1.joint_rotation[0:res.joint_rotation.shape[0]]
+    # return res
+    # TODO: 你的代码
+    for i in range(0, alpha.shape[0]):
+        j = int(i / alpha.shape[0]  * len1)
+        k = int(i / alpha.shape[0]  * len2)
+        
+        #blend root joint postions
+        res.joint_position[i, :] = (1 - alpha[i]) * bvh_motion1.joint_position[j,:] + alpha[i] *bvh_motion2.joint_position[k,:]
+
+        #blend joint rotations
+        for m in range(0, len_joint):
+            q1 = bvh_motion1.joint_rotation[j,m]
+            q2 = bvh_motion2.joint_rotation[k,m]
+
+            #当两个四元数角度为钝角时，进行对q1按原点对称
+            if np.dot(q1, q2) < 0:
+                q1 = -q1
+            
+            if np.dot(q1, q2) == 1:
+                res.joint_rotation[i, m] = q1
+                continue
+            # at = (1-alpha[i])
+            # bt = alpha[i]
+            theta = np.arccos(np.dot(q1, q2))
+            at = np.sin((1-alpha[i])*theta) / np.sin(theta)
+            bt = np.sin(alpha[i] * theta) / np.sin(theta)
+          
+            res.joint_rotation[i, m] = at * q1 + bt * q2
+
     return res
 
 # part3
@@ -278,8 +347,52 @@ def concatenate_two_motions(bvh_motion1, bvh_motion2, mix_frame1, mix_time):
     
     # TODO: 你的代码
     # 下面这种直接拼肯定是不行的(
-    res.joint_position = np.concatenate([res.joint_position[:-mix_time], bvh_motion2.joint_position], axis=0)
-    res.joint_rotation = np.concatenate([res.joint_rotation[:-mix_time], bvh_motion2.joint_rotation], axis=0)
+
+    target_facing_direction_xz = R.from_quat(bvh_motion1.joint_rotation[mix_frame1, 0]).apply([0,0,1])[[0,2]]
+    target_translation_xz = bvh_motion1.joint_position[mix_frame1, 0, [0,2]]
     
+    motion2 = bvh_motion2.translation_and_rotation(0, target_translation_xz, target_facing_direction_xz)
+    #return motion2
+    blend_positions = np.zeros((mix_time, res.joint_position.shape[1], res.joint_position.shape[2]))
+    blend_rotations = np.zeros((mix_time, res.joint_rotation.shape[1], res.joint_rotation.shape[2]))
+    # res.joint_position = np.concatenate([bvh_motion1.joint_position[:mix_frame1], motion2.joint_position], axis=0)
+    # res.joint_rotation = np.concatenate([bvh_motion1.joint_rotation[:mix_frame1], motion2.joint_rotation], axis=0)
+    # return res
+
+    len_joint = res.joint_rotation.shape[1]
+    for i in range(0, mix_time):
+        t = i/(mix_time-1)
+  
+        #blend root joint postions
+        blend_positions[i, :] = (1-t) * bvh_motion1.joint_position[mix_frame1 + i,:] + t * motion2.joint_position[i,:]
+
+        #blend joint rotations
+        for m in range(0, len_joint):
+            q1 = bvh_motion1.joint_rotation[mix_frame1 + i,m]
+            q2 = motion2.joint_rotation[i,m]
+
+            #当两个四元数角度为钝角时，进行对q1按原点对称
+            if np.dot(q1, q2) < 0:
+                q1 = -q1
+            
+            if np.dot(q1, q2) == 1:
+                blend_rotations[i, m] = q1
+                continue
+            
+            theta = np.arccos(np.dot(q1, q2))
+            at = np.sin((1-t)*theta) / np.sin(theta)
+            bt = np.sin(t*theta) / np.sin(theta)
+            
+            blend_rotations[i, m] = at * q1 + bt * q2
+
+
+    res.joint_position = np.concatenate([bvh_motion1.joint_position[:mix_frame1], blend_positions, motion2.joint_position[mix_time:]], axis=0)
+    res.joint_rotation = np.concatenate([bvh_motion1.joint_rotation[:mix_frame1], blend_rotations, motion2.joint_rotation[mix_time:]], axis=0)
+    #res.joint_position = blend_positions
+    # res.joint_rotation = blend_rotations
     return res
 
+
+if __name__ == '__main__':
+    motion = BVHMotion()
+    # Ry, Rxz = motion.decompose_rotation_with_yaxis(R.from_rotvec([0, 1.42, 1.0]).as_quat())
