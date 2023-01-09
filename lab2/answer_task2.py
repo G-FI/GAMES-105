@@ -5,11 +5,42 @@ from answer_task1 import *
 class CharacterController():
     def __init__(self, controller) -> None:
         self.motions = []
-        self.motions.append(BVHMotion('motion_material/walk_forward.bvh'))
+        # self.motions.append(BVHMotion('motion_material/idle.bvh'))
+        # self.motions.append(BVHMotion('motion_material/walk_forward.bvh'))
+        # self.motions.append(BVHMotion('motion_material/run_forward.bvh'))
+
+        # self.motions.append(BVHMotion('motion_material/walk_and_turn_left.bvh'))
+        # self.motions.append(BVHMotion('motion_material/walk_and_turn_right.bvh'))
+
+        # self.motions.append(BVHMotion('motion_material/walkF.bvh'))
+        self.motions.append(BVHMotion('motion_material/kinematic_motion/long_walk.bvh'))
+
+        #计算特征向量,位置，旋转，速度，角速度
+        self.rate = 100
+
+
+        self.feature_mat = []
+        for i in range(self.motions[0].joint_position.shape[0]):
+            feature_vec = np.array(self.motions[0].joint_position[i, 0])
+            feature_vec = np.append(feature_vec, self.motions[0].joint_rotation[i, 0])
+            #计算速度
+            vel = np.array([0,0,0])
+            feature_vec = np.append(feature_vec, vel)
+            #计算角速度
+            avel = np.array([0,0,0])
+            feature_vec = np.append(feature_vec, avel)
+
+            self.feature_mat.append(feature_vec)
+        self.feature_mat = np.array(self.feature_mat)
+        match_motion = self.motions[0].sub_sequence(0,self.rate)
+        self.match_joint_name = match_motion.joint_name
+        self.match_joint_trs,self.match_joint_ort = match_motion.batch_forward_kinematics()
+
         self.controller = controller
         self.cur_root_pos = None
         self.cur_root_rot = None
         self.cur_frame = 0
+
         pass
     
     def update_state(self, 
@@ -38,17 +69,45 @@ class CharacterController():
             分别对应着面朝向移动速度,侧向移动速度和向后移动速度.目前根据LAFAN的统计数据设为(1.75,1.5,1.25)
             如果和你的角色动作速度对不上,你可以在init或这里对属性进行修改
         '''
+
         # 一个简单的例子，输出第i帧的状态
-        joint_name = self.motions[0].joint_name
-        joint_translation, joint_orientation = self.motions[0].batch_forward_kinematics()
-        joint_translation = joint_translation[self.cur_frame]
-        joint_orientation = joint_orientation[self.cur_frame]
+        # joint_name = self.motions[2].joint_name
+        # joint_translation, joint_orientation = self.motions[2].batch_forward_kinematics()
+        # joint_translation = joint_translation[self.cur_frame]
+        # joint_orientation = joint_orientation[self.cur_frame]
+
         
-        self.cur_root_pos = joint_translation[0]
-        self.cur_root_rot = joint_orientation[0]
-        self.cur_frame = (self.cur_frame + 1) % self.motions[0].motion_length
-        
-        return joint_name, joint_translation, joint_orientation
+        # self.cur_root_pos = joint_translation[0]
+        # self.cur_root_rot = joint_orientation[0]
+        # self.cur_frame = (self.cur_frame + 1) % self.motions[2].motion_length 
+        if self.cur_frame <self.rate:
+            cur_frame = self.cur_frame
+            self.cur_frame += 1
+            self.cur_root_pos = self.match_joint_trs[cur_frame, 0]
+            self.cur_root_rot = self.match_joint_ort[cur_frame, 0]
+            return self.match_joint_name, self.match_joint_trs[cur_frame], self.match_joint_ort[cur_frame]
+
+        self.cur_frame = 1
+
+        min_cost_idx = 0
+        min_cost = np.inf
+        for i in range(self.rate, self.feature_mat.shape[0] - self.rate):
+            feature_vecs = [ self.feature_mat[i + idx] for idx in [0, 20, 40, 60, 80, 100]]
+            cost = 0
+            # cost = np.linalg.norm(feature_vecs[0][0:3] - desired_pos_list[0])
+            # cost += (1 - np.abs(np.dot(feature_vecs[0, 3:7], desired_rot_list[0]))) * 10
+            # cost = np.linalg.norm( - desired_pos_list[0])
+            for j in range(6):
+                cost += j*100 * np.linalg.norm(feature_vecs[j][0:3] - desired_pos_list[j])
+                cost += j*100 * (1 - np.abs(np.dot(feature_vecs[j][3:7], desired_rot_list[j])))
+
+            if cost < min_cost:
+                min_cost = cost
+                min_cost_idx = i
+        match_motion = self.motions[0].sub_sequence(min_cost_idx, min_cost_idx + self.rate)
+        self.match_joint_name = match_motion.joint_name
+        self.match_joint_trs, self.match_joint_ort = match_motion.batch_forward_kinematics()
+        return self.match_joint_name, self.match_joint_trs[0], self.match_joint_ort[0]
     
     
     def sync_controller_and_character(self, controller, character_state):
